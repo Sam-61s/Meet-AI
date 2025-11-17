@@ -1,15 +1,24 @@
+// MODIFIED VERSION - Uses Google Gemini API (FREE) instead of OpenAI
+// This version uses Gemini which is already installed in your project
+
 import { db } from "@/db";
 import { agents, meetings, user } from "@/db/schema";
 import { inngest } from "@/inngest/client";
 import { StreamTranscriptItem } from "@/modules/meetings/types";
 import { eq, inArray } from "drizzle-orm";
 import JSONL from "jsonl-parse-stringify"
-import {createAgent, openai, TextMessage} from "@inngest/agent-kit";
+import { GoogleGenAI } from "@google/genai";
 
-const summerizer = createAgent({
-  name: "summarizer",
-  system: `
-    You are an expert summarizer. You write readable, concise, simple content. You are given a transcript of a meeting and you need to summarize it.
+// Initialize Google Gemini AI with free API key
+const genAI = new GoogleGenAI({ 
+  apiKey: process.env.GEMINI_API_KEY || ""
+  // Don't specify apiVersion - let the SDK use the default
+});
+
+// Helper function to summarize using Gemini
+async function summarizeWithGemini(transcript: string): Promise<string> {
+  const systemPrompt = `
+You are an expert summarizer. You write readable, concise, simple content. You are given a transcript of a meeting and you need to summarize it.
 
 Use the following markdown structure for every output:
 
@@ -28,9 +37,26 @@ Example:
 #### Next Section
 - Feature X automatically does Y
 - Mention of integration with Z
-  `.trim(),
-  model: openai({ model: "gpt-4o", apiKey: process.env.OPENAI_API_KEY }),
-});
+  `.trim();
+
+  const prompt = `${systemPrompt}\n\nTranscript to summarize:\n${transcript}`;
+
+  try {
+    const result = await genAI.models.generateContent({
+      model: "gemini-2.0-flash-exp", // Using experimental model (available in default API)
+      contents: prompt,
+      config: {
+        temperature: 0.7,
+        maxOutputTokens: 2048,
+      }
+    });
+    
+    return result.text || "Summary generation failed";
+  } catch (error) {
+    console.error("Gemini API error:", error);
+    throw new Error("Failed to generate summary with Gemini");
+  }
+}
 
 export const meetingsProcessing = inngest.createFunction(
   { id: "meetings/processing" },
@@ -94,21 +120,20 @@ export const meetingsProcessing = inngest.createFunction(
         })
     });
 
-    const { output } = await summerizer.run(
-      "Summarize the following transcript: "+
-      JSON.stringify(transcirptWithSpeakers)
-    );
+    // Use Gemini instead of OpenAI for summarization
+    const summary = await step.run("generate-summary", async () => {
+      const transcriptText = JSON.stringify(transcirptWithSpeakers);
+      return await summarizeWithGemini(transcriptText);
+    });
 
     await step.run("save-summary", async() => {
       await db 
         .update(meetings)
         .set({
-          summary: (output[0] as TextMessage).content as string,
+          summary: summary,
           status: "completed",
         })
         .where(eq(meetings.id, event.data.meetingId))
     })
-
-
   } ,
 );
